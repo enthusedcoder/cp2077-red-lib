@@ -867,6 +867,10 @@ public:
     }
 };
 
+
+template<typename TSystem>
+struct SystemBuilder;
+
 template<typename TClass>
 requires std::is_class_v<TClass>
 struct ClassDefinition
@@ -966,7 +970,7 @@ struct SystemBuilder
                 if (framework && framework->gameInstance)
                 {
                     static const auto systemType = GetType<TSystem>();
-                    const auto systemInstance = framework->gameInstance->systemMap.Get(systemType);
+                    const auto systemInstance = framework->gameInstance->GetSystem(systemType);
                     if (systemInstance)
                     {
                         *aRet = *systemInstance;
@@ -1000,10 +1004,10 @@ struct SystemBuilder
             return;
         }
 
-        auto gameInstance = engine->framework->gameInstance;
+        auto gameInstance = static_cast<Red::GameInstance*>(engine->framework->gameInstance);
         auto systemType = GetClass<TSystem>();
 
-        if (gameInstance->systemMap.Get(systemType))
+        if (gameInstance->GetSystem(systemType))
             return;
 
         auto systemInstance = BuildSystem();
