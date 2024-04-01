@@ -113,40 +113,30 @@ using FinalRetType = T;
 template<typename T = void>
 inline void ExtractArg(CStackFrame* aFrame, T* aInstance = nullptr)
 {
-    using U = std::remove_cvref_t<T>;
-
-    if constexpr (std::is_pointer_v<U>)
+    if constexpr (std::is_pointer_v<T>)
     {
         aFrame->useDirectData = true;
-    }
-    else if constexpr (IsScriptRef<U>)
-    {
-        if ((aFrame->paramFlags >> aFrame->currentParam) & 1)
-        {
-            aInstance->AllocateValue();
-        }
     }
 
     aFrame->data = nullptr;
     aFrame->dataType = nullptr;
+    ++aFrame->currentParam;
 
     const auto opcode = *(aFrame->code++);
-    OpcodeHandlers::Run(opcode, aFrame->context, aFrame, aInstance, IsScriptRef<U> ? aInstance : nullptr);
+    OpcodeHandlers::Run(opcode, aFrame->context, aFrame, aInstance, IsScriptRef<T> ? aInstance : nullptr);
 
-    if constexpr (std::is_pointer_v<U>)
+    if constexpr (std::is_pointer_v<T>)
     {
         aFrame->useDirectData = false;
 
-        if constexpr (!std::is_void_v<U>)
+        if constexpr (!std::is_void_v<T>)
         {
             if (aFrame->data && aInstance)
             {
-                *aInstance = reinterpret_cast<U>(aFrame->data);
+                *aInstance = reinterpret_cast<T>(aFrame->data);
             }
         }
     }
-
-    ++aFrame->currentParam;
 }
 
 template<typename C, typename T, std::size_t I>
@@ -163,6 +153,14 @@ inline void ExtractArg(C* aContext, CStackFrame* aFrame, T* aArg)
         ScriptRef<C> ctx;
         ExtractArg(aFrame, &ctx);
         *aArg = ctx.ref;
+    }
+    else if constexpr (IsScriptRef<U>)
+    {
+        if ((aFrame->paramFlags >> aFrame->currentParam) & 1)
+        {
+            aArg->AllocateValue();
+        }
+        ExtractArg(aFrame, aArg);
     }
     else if constexpr (std::is_same_v<T, CStackFrame*>)
     {
@@ -447,12 +445,6 @@ inline bool IsSpecial(CBaseFunction* aFunc)
 inline void MarkSpecial(CBaseFunction* aFunc)
 {
     *reinterpret_cast<Detail::FunctionFlagsStorage*>(&aFunc->flags) |= Detail::FunctionSpecialFlag;
-}
-
-template<typename T = void>
-inline void GetParameter(CStackFrame* aFrame, T* aInstance = nullptr)
-{
-    Detail::ExtractArg(aFrame, aInstance);
 }
 
 template<typename C, typename R, typename RT>
@@ -754,33 +746,6 @@ public:
     {
     }
 
-    bool HasOption(int64_t aValue)
-    {
-        for (uint32_t i = 0; i != valueList.size; ++i)
-        {
-            if (aValue == valueList.entries[i])
-                return true;
-        }
-
-        return false;
-    }
-
-    bool HasOption(CName aName)
-    {
-        for (uint32_t i = 0; i != valueList.size; ++i)
-        {
-            if (aName == hashList.entries[i])
-                return true;
-        }
-
-        return false;
-    }
-
-    bool HasOption(const char* aName)
-    {
-        return HasOption(CName(aName));
-    }
-
     void AddOption(int64_t aValue, const char* aName)
     {
         if (aValue < Limits::min())
@@ -902,6 +867,85 @@ public:
     }
 };
 
+template<typename TClass>
+requires std::is_class_v<TClass>
+struct ClassDefinition
+{
+    using Descriptor = ClassDescriptorDefaultImpl<TClass>;
+    using Specialization = TypeInfoBuilder<Scope::For<TClass>()>;
+
+    static inline void RegisterType()
+    {
+        constexpr auto name = GetTypeNameStr<TClass>();
+
+        auto* type = new Descriptor();
+        type->name = CNamePool::Add(name.data());
+
+        if constexpr (Detail::HasRegisterHandler<Specialization, Descriptor>)
+        {
+            Specialization::Register(type);
+        }
+
+        auto* rtti = CRTTISystem::Get();
+        rtti->RegisterType(type);
+    }
+
+    static inline void DescribeType()
+    {
+        constexpr auto name = GetTypeName<TClass>();
+
+        auto* rtti = CRTTISystem::Get();
+        auto* type = reinterpret_cast<Descriptor*>(rtti->GetClass(name));
+
+        if (!type)
+            return;
+
+        if constexpr (Detail::IsScriptable<TClass>)
+        {
+            if (!type->parent)
+            {
+                if constexpr (Detail::IsGameSystem<TClass>)
+                {
+                    type->parent = GetClass<IGameSystem>();
+                }
+                else if constexpr (Detail::IsScriptableSystem<TClass>)
+                {
+                    type->parent = GetClass<ScriptableSystem>();
+                }
+                else
+                {
+                    type->parent = GetClass<IScriptable>();
+                }
+            }
+        }
+
+        if constexpr (Detail::HasDescribeHandler<Specialization, Descriptor>)
+        {
+            Specialization::Describe(type);
+        }
+
+        type->flags.isNative = true;
+
+        if constexpr (Detail::IsScriptableSystem<TClass>)
+        {
+            type->flags.isScriptedClass = true;
+        }
+
+        if constexpr (Detail::IsGameSystem<TClass>)
+        {
+            SystemBuilder<TClass>::RegisterGetter();
+            SystemBuilder<TClass>::RegisterSystem();
+        }
+    }
+
+    inline static TypeInfoRegistrar s_registrar{&RegisterType, &DescribeType}; // NOLINT(cert-err58-cpp)
+
+    constexpr operator Scope() const noexcept
+    {
+        return Scope::For<TClass>();
+    }
+};
+
 template<typename TSystem>
 struct SystemBuilder
 {
@@ -985,85 +1029,6 @@ struct SystemBuilder
         {
             return MakeHandle<TSystem>();
         }
-    }
-};
-
-template<typename TClass>
-requires std::is_class_v<TClass>
-struct ClassDefinition
-{
-    using Descriptor = ClassDescriptorDefaultImpl<TClass>;
-    using Specialization = TypeInfoBuilder<Scope::For<TClass>()>;
-
-    static inline void RegisterType()
-    {
-        constexpr auto name = GetTypeNameStr<TClass>();
-
-        auto* type = new Descriptor();
-        type->name = CNamePool::Add(name.data());
-
-        if constexpr (Detail::HasRegisterHandler<Specialization, Descriptor>)
-        {
-            Specialization::Register(type);
-        }
-
-        auto* rtti = CRTTISystem::Get();
-        rtti->RegisterType(type);
-    }
-
-    static inline void DescribeType()
-    {
-        constexpr auto name = GetTypeName<TClass>();
-
-        auto* rtti = CRTTISystem::Get();
-        auto* type = reinterpret_cast<Descriptor*>(rtti->GetClass(name));
-
-        if (!type)
-            return;
-
-        if constexpr (Detail::IsScriptable<TClass>)
-        {
-            if (!type->parent)
-            {
-                if constexpr (Detail::IsGameSystem<TClass>)
-                {
-                    type->parent = GetClass<IGameSystem>();
-                }
-                else if constexpr (Detail::IsScriptableSystem<TClass>)
-                {
-                    type->parent = GetClass<ScriptableSystem>();
-                }
-                else
-                {
-                    type->parent = GetClass<IScriptable>();
-                }
-            }
-        }
-
-        if constexpr (Detail::HasDescribeHandler<Specialization, Descriptor>)
-        {
-            Specialization::Describe(type);
-        }
-
-        type->flags.isNative = true;
-
-        if constexpr (Detail::IsScriptableSystem<TClass>)
-        {
-            type->flags.isScriptedClass = true;
-        }
-
-        if constexpr (Detail::IsGameSystem<TClass>)
-        {
-            SystemBuilder<TClass>::RegisterGetter();
-            SystemBuilder<TClass>::RegisterSystem();
-        }
-    }
-
-    inline static TypeInfoRegistrar s_registrar{&RegisterType, &DescribeType}; // NOLINT(cert-err58-cpp)
-
-    constexpr operator Scope() const noexcept
-    {
-        return Scope::For<TClass>();
     }
 };
 
@@ -1209,23 +1174,4 @@ struct GlobalDefinition
         return AScope;
     }
 };
-
-template<typename T>
-inline auto GetDescriptor()
-{
-    auto rtti = CRTTISystem::Get();
-
-    if constexpr (std::is_class_v<T>)
-    {
-        return reinterpret_cast<ClassDescriptor<T>*>(rtti->GetClass(GetTypeName<T>()));
-    }
-    else if constexpr (std::is_enum_v<T>)
-    {
-        return reinterpret_cast<EnumDescriptor<T>*>(rtti->GetEnum(GetTypeName<T>()));
-    }
-    else
-    {
-        return rtti->GetType(GetTypeName<T>());
-    }
-}
 }
